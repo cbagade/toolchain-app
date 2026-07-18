@@ -8,9 +8,12 @@
 #   setup → test → static-scan → containerize
 #
 # Environment variables injected by the Tekton runtime into every task:
-#   IMAGE_REPOSITORY  — fully-qualified container registry path
-#   IMAGE_TAG         — image tag produced by the containerize stage
-#   APP_NAME          — user-defined toolchain pipeline parameter
+#   IMAGE_TAG           — image tag produced by the containerize stage
+#
+# User-defined pipeline parameters (set in toolchain environment properties):
+#   DOCKERHUB_USERNAME  — Docker Hub username
+#   DOCKERHUB_TOKEN     — Docker Hub access token (stored as secret)
+#   IMAGE_NAME          — Image name (e.g. toolchain-app)
 # ─────────────────────────────────────────────────────────────────────────────
 version: "1"
 
@@ -95,10 +98,16 @@ static-scan:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE: containerize
-# Purpose : Build and push the Docker image to IBM Container Registry using
-#           the Dockerfile at the repository root. Nested properties expose
-#           the Dockerfile path and allow optional build-arg injection for
-#           build-time configuration (e.g. APP_VERSION, BUILD_DATE).
+# Purpose : Build and push the Docker image to Docker Hub.
+#           Authenticates using DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
+#           pipeline parameters (stored as secrets in the toolchain).
+#           Nested properties expose the Dockerfile path and build-args.
+#
+# Required pipeline parameters:
+#   DOCKERHUB_USERNAME  — Docker Hub username (e.g. cbagade)
+#   DOCKERHUB_TOKEN     — Docker Hub access token (store as secret)
+#   IMAGE_NAME          — Image name without registry prefix (e.g. toolchain-app)
+#   IMAGE_TAG           — Tag for the image (injected by OnePipeline runtime)
 # ─────────────────────────────────────────────────────────────────────────────
 containerize:
   image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
@@ -116,20 +125,33 @@ containerize:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Full Docker Hub image reference: <username>/<image-name>:<tag>
+    FULL_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+    echo "==> [containerize] Authenticating with Docker Hub"
+    echo "${DOCKERHUB_TOKEN}" | docker login \
+      --username "${DOCKERHUB_USERNAME}" \
+      --password-stdin
+
     echo "==> [containerize] Building Docker image"
-    echo "    Repository : ${IMAGE_REPOSITORY}"
-    echo "    Tag        : ${IMAGE_TAG}"
+    echo "    Image      : ${FULL_IMAGE}"
     echo "    Dockerfile : Dockerfile"
 
     docker build \
       --file Dockerfile \
-      --tag "${IMAGE_REPOSITORY}:${IMAGE_TAG}" \
+      --tag "${FULL_IMAGE}" \
       --build-arg APP_VERSION="${IMAGE_TAG}" \
       --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       .
 
-    echo "==> [containerize] Pushing image to IBM Container Registry"
-    docker push "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+    echo "==> [containerize] Pushing image to Docker Hub"
+    docker push "${FULL_IMAGE}"
 
-    echo "==> [containerize] Image ${IMAGE_REPOSITORY}:${IMAGE_TAG} pushed successfully"
+    echo "==> [containerize] Image ${FULL_IMAGE} pushed successfully"
+
+    # Also tag and push as 'latest'
+    docker tag "${FULL_IMAGE}" "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
+    docker push "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
+
+    echo "==> [containerize] Latest tag pushed: ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
 
