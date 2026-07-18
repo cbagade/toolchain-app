@@ -1,0 +1,135 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IBM OnePipeline DevSecOps Version 11 — Pipeline Configuration
+#
+# Specification: https://cloud.ibm.com/docs/devsecops
+# Syntax version: "1" (V11 task-hook model — replaces V10 flat top-level blocks)
+#
+# Stage execution order (managed by the OnePipeline Tekton runtime):
+#   setup → test → static-scan → containerize
+#
+# Environment variables injected by the Tekton runtime into every task:
+#   IMAGE_REPOSITORY  — fully-qualified container registry path
+#   IMAGE_TAG         — image tag produced by the containerize stage
+#   APP_NAME          — user-defined toolchain pipeline parameter
+# ─────────────────────────────────────────────────────────────────────────────
+version: "1"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE: setup
+# Purpose : Install project dependencies and warm the pip cache so subsequent
+#           stages (test, static-scan) resolve packages from the local cache
+#           rather than PyPI — reducing latency and improving reproducibility.
+# ─────────────────────────────────────────────────────────────────────────────
+setup:
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+  script: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> [setup] Installing pip dependencies into cache"
+    pip install --upgrade pip
+    pip install --cache-dir="${HOME}/.cache/pip" -r requirements.txt
+
+    echo "==> [setup] Dependency installation complete"
+    pip list
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE: test
+# Purpose : Execute the standard-library unittest suite.
+#           abort_on_failure: true enforces a hard gate — any test failure
+#           prevents the pipeline from promoting to containerize or deploy,
+#           satisfying IBM DevSecOps compliance policy CC-7.
+# ─────────────────────────────────────────────────────────────────────────────
+test:
+  abort_on_failure: true
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+  script: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> [test] Installing dependencies"
+    pip install --cache-dir="${HOME}/.cache/pip" -r requirements.txt
+
+    echo "==> [test] Running unit tests via unittest discover"
+    python -m unittest discover \
+      --start-directory . \
+      --pattern "test_*.py" \
+      --verbose
+
+    echo "==> [test] All tests passed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE: static-scan
+# Purpose : Run Bandit SAST (Static Application Security Testing) against the
+#           Python source tree. skip: false is explicitly declared to override
+#           any toolchain-level skip flag — security scanning is mandatory.
+#           Severity threshold: LOW and above (-ll) to catch all classes of
+#           vulnerability in the IBM supply-chain compliance policy.
+# ─────────────────────────────────────────────────────────────────────────────
+static-scan:
+  skip: false
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+  script: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> [static-scan] Installing Bandit SAST tool"
+    pip install bandit
+
+    echo "==> [static-scan] Running Bandit on source tree"
+    bandit \
+      --recursive . \
+      --severity-level low \
+      --confidence-level low \
+      --format json \
+      --output bandit-report.json \
+      || true
+
+    echo "==> [static-scan] Bandit human-readable summary"
+    bandit \
+      --recursive . \
+      --severity-level low \
+      --confidence-level low
+
+    echo "==> [static-scan] Static scan complete — report saved to bandit-report.json"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE: containerize
+# Purpose : Build and push the Docker image to IBM Container Registry using
+#           the Dockerfile at the repository root. Nested properties expose
+#           the Dockerfile path and allow optional build-arg injection for
+#           build-time configuration (e.g. APP_VERSION, BUILD_DATE).
+# ─────────────────────────────────────────────────────────────────────────────
+containerize:
+  image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+  dind: true
+  properties:
+    - type: text
+      name: dockerfile
+      value: Dockerfile
+    - type: text
+      name: build-args
+      value: |
+        APP_VERSION=${IMAGE_TAG}
+        BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  script: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "==> [containerize] Building Docker image"
+    echo "    Repository : ${IMAGE_REPOSITORY}"
+    echo "    Tag        : ${IMAGE_TAG}"
+    echo "    Dockerfile : Dockerfile"
+
+    docker build \
+      --file Dockerfile \
+      --tag "${IMAGE_REPOSITORY}:${IMAGE_TAG}" \
+      --build-arg APP_VERSION="${IMAGE_TAG}" \
+      --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      .
+
+    echo "==> [containerize] Pushing image to IBM Container Registry"
+    docker push "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+
+    echo "==> [containerize] Image ${IMAGE_REPOSITORY}:${IMAGE_TAG} pushed successfully"
+
