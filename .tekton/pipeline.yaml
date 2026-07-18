@@ -86,7 +86,7 @@ spec:
           - name: source
         steps:
           - name: setup
-            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            image: python:3.11-slim
             workingDir: $(workspaces.source.path)
             script: |
               #!/usr/bin/env bash
@@ -108,7 +108,7 @@ spec:
           - name: source
         steps:
           - name: test
-            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            image: python:3.11-slim
             workingDir: $(workspaces.source.path)
             script: |
               #!/usr/bin/env bash
@@ -133,7 +133,7 @@ spec:
           - name: source
         steps:
           - name: static-scan
-            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            image: python:3.11-slim
             workingDir: $(workspaces.source.path)
             script: |
               #!/usr/bin/env bash
