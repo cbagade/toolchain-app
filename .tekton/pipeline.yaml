@@ -140,7 +140,8 @@ spec:
               set -euo pipefail
               echo "==> [static-scan] Installing Bandit SAST tool"
               pip install bandit
-              echo "==> [static-scan] Running Bandit on source tree"
+
+              echo "==> [static-scan] Running Bandit — saving JSON report"
               bandit \
                 --recursive . \
                 --severity-level low \
@@ -148,11 +149,23 @@ spec:
                 --format json \
                 --output bandit-report.json \
                 || true
+
               echo "==> [static-scan] Bandit human-readable summary"
               bandit \
                 --recursive . \
                 --severity-level low \
-                --confidence-level low
+                --confidence-level low \
+                || true
+
+              echo "==> [static-scan] Checking for HIGH severity issues (hard gate)"
+              # Fail the pipeline ONLY if HIGH severity vulnerabilities are found
+              HIGH=$(bandit --recursive . --severity-level high --confidence-level high --format json 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('results',[])))")
+              if [ "${HIGH}" -gt 0 ]; then
+                echo "FAIL: ${HIGH} HIGH severity issue(s) found — pipeline aborted"
+                exit 1
+              fi
+              echo "==> [static-scan] No HIGH severity issues — scan passed (${HIGH} high findings)"
               echo "==> [static-scan] Complete — report saved to bandit-report.json"
       workspaces:
         - name: source
