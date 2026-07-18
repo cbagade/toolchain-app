@@ -173,7 +173,7 @@ spec:
         - name: source
           workspace: source
 
-    # ── 5. Containerize ───────────────────────────────────────────────────────
+    # ── 5. Containerize (Kaniko — daemonless, no Docker socket needed) ─────────
     - name: containerize
       runAfter: [static-scan]
       taskSpec:
@@ -185,31 +185,48 @@ spec:
         workspaces:
           - name: source
         steps:
-          - name: containerize
-            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+          # Step 1: Write Docker Hub credentials into the Kaniko config dir
+          - name: write-dockerconfig
+            image: busybox
             workingDir: $(workspaces.source.path)
             script: |
-              #!/usr/bin/env bash
-              set -euo pipefail
-              FULL_IMAGE="$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):$(params.IMAGE_TAG)"
-              echo "==> [containerize] Authenticating with Docker Hub"
-              echo "$(params.DOCKERHUB_TOKEN)" | docker login \
-                --username "$(params.DOCKERHUB_USERNAME)" \
-                --password-stdin
-              echo "==> [containerize] Building image: ${FULL_IMAGE}"
-              docker build \
-                --file Dockerfile \
-                --tag "${FULL_IMAGE}" \
-                --build-arg APP_VERSION="$(params.IMAGE_TAG)" \
-                --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-                .
-              echo "==> [containerize] Pushing ${FULL_IMAGE}"
-              docker push "${FULL_IMAGE}"
-              docker tag "${FULL_IMAGE}" \
-                "$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):latest"
-              docker push \
-                "$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):latest"
-              echo "==> [containerize] Done — both tags pushed to Docker Hub"
+              #!/bin/sh
+              set -e
+              echo "==> [containerize] Writing Docker Hub credentials for Kaniko"
+              mkdir -p /kaniko/.docker
+              # Encode credentials as base64 for Docker config.json
+              AUTH=$(echo -n "$(params.DOCKERHUB_USERNAME):$(params.DOCKERHUB_TOKEN)" | base64 | tr -d '\n')
+              cat > /kaniko/.docker/config.json <<EOF
+              {
+                "auths": {
+                  "https://index.docker.io/v1/": {
+                    "auth": "${AUTH}"
+                  }
+                }
+              }
+              EOF
+              echo "==> [containerize] Docker credentials written"
+            volumeMounts:
+              - name: kaniko-secret
+                mountPath: /kaniko/.docker
+
+          # Step 2: Build and push both tags using Kaniko
+          - name: build-and-push
+            image: gcr.io/kaniko-project/executor:latest
+            workingDir: $(workspaces.source.path)
+            args:
+              - --dockerfile=Dockerfile
+              - --context=$(workspaces.source.path)
+              - --destination=$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):$(params.IMAGE_TAG)
+              - --destination=$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):latest
+              - --build-arg=APP_VERSION=$(params.IMAGE_TAG)
+              - --verbosity=info
+            volumeMounts:
+              - name: kaniko-secret
+                mountPath: /kaniko/.docker
+        volumes:
+          - name: kaniko-secret
+            emptyDir: {}
       params:
         - name: DOCKERHUB_USERNAME
           value: $(params.DOCKERHUB_USERNAME)
