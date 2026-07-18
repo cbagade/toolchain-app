@@ -25,6 +25,8 @@ spec:
       default: ""
     - name: DOCKERHUB_USERNAME
       description: Docker Hub username
+    - name: DOCKERHUB_TOKEN
+      description: Docker Hub access token (secret)
     - name: IMAGE_NAME
       description: Docker image name (without registry prefix)
       default: toolchain-app
@@ -177,27 +179,21 @@ spec:
       taskSpec:
         params:
           - name: DOCKERHUB_USERNAME
+          - name: DOCKERHUB_TOKEN
           - name: IMAGE_NAME
           - name: IMAGE_TAG
         workspaces:
           - name: source
-          - name: dockerconfig
         steps:
           - name: containerize
             image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
             workingDir: $(workspaces.source.path)
-            env:
-              - name: DOCKERHUB_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: dockerhub-secret
-                    key: token
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
               FULL_IMAGE="$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):$(params.IMAGE_TAG)"
               echo "==> [containerize] Authenticating with Docker Hub"
-              echo "${DOCKERHUB_TOKEN}" | docker login \
+              echo "$(params.DOCKERHUB_TOKEN)" | docker login \
                 --username "$(params.DOCKERHUB_USERNAME)" \
                 --password-stdin
               echo "==> [containerize] Building image: ${FULL_IMAGE}"
@@ -217,6 +213,8 @@ spec:
       params:
         - name: DOCKERHUB_USERNAME
           value: $(params.DOCKERHUB_USERNAME)
+        - name: DOCKERHUB_TOKEN
+          value: $(params.DOCKERHUB_TOKEN)
         - name: IMAGE_NAME
           value: $(params.IMAGE_NAME)
         - name: IMAGE_TAG
