@@ -43,6 +43,9 @@ spec:
     - name: DOCKERHUB_USERNAME
       description: Docker Hub username
       default: cbagade
+    - name: DOCKERHUB_TOKEN
+      description: Docker Hub access token
+      default: ""
     - name: IMAGE_NAME
       description: Docker image name
       default: toolchain-app
@@ -61,12 +64,13 @@ spec:
           - name: repository
             value: $(tt.params.repository)
           - name: branch
-            # Strip "refs/heads/" prefix to get the plain branch name
             value: $(tt.params.branch)
           - name: revision
             value: $(tt.params.revision)
           - name: DOCKERHUB_USERNAME
             value: $(tt.params.DOCKERHUB_USERNAME)
+          - name: DOCKERHUB_TOKEN
+            value: $(tt.params.DOCKERHUB_TOKEN)
           - name: IMAGE_NAME
             value: $(tt.params.IMAGE_NAME)
           - name: IMAGE_TAG
