@@ -1,0 +1,98 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# IBM Continuous Delivery — Tekton Triggers
+# TriggerTemplate + TriggerBinding + EventListener
+#
+# Fires a PipelineRun when a commit is pushed to the main branch.
+# The IBM Delivery Pipeline Tekton worker intercepts the GitHub webhook
+# and maps the payload fields to pipeline params via TriggerBinding.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── TriggerBinding ────────────────────────────────────────────────────────────
+# Maps incoming GitHub webhook JSON fields to named parameters.
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerBinding
+metadata:
+  name: toolchain-app-binding
+spec:
+  params:
+    - name: repository
+      value: $(body.repository.clone_url)
+    - name: branch
+      value: $(body.ref)
+    - name: revision
+      value: $(body.head_commit.id)
+
+---
+# ── TriggerTemplate ───────────────────────────────────────────────────────────
+# Defines the PipelineRun to create each time the trigger fires.
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: toolchain-app-template
+spec:
+  params:
+    - name: repository
+      description: Git repository URL
+    - name: branch
+      description: Git branch ref (e.g. refs/heads/main)
+      default: refs/heads/main
+    - name: revision
+      description: Git commit SHA
+      default: ""
+    - name: DOCKERHUB_USERNAME
+      description: Docker Hub username
+      default: cbagade
+    - name: IMAGE_NAME
+      description: Docker image name
+      default: toolchain-app
+    - name: IMAGE_TAG
+      description: Docker image tag
+      default: latest
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        generateName: toolchain-app-run-
+      spec:
+        pipelineRef:
+          name: toolchain-app-pipeline
+        params:
+          - name: repository
+            value: $(tt.params.repository)
+          - name: branch
+            # Strip "refs/heads/" prefix to get the plain branch name
+            value: $(tt.params.branch)
+          - name: revision
+            value: $(tt.params.revision)
+          - name: DOCKERHUB_USERNAME
+            value: $(tt.params.DOCKERHUB_USERNAME)
+          - name: IMAGE_NAME
+            value: $(tt.params.IMAGE_NAME)
+          - name: IMAGE_TAG
+            value: $(tt.params.IMAGE_TAG)
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 1Gi
+
+---
+# ── EventListener ─────────────────────────────────────────────────────────────
+# Listens for incoming GitHub webhook events and routes them to the
+# TriggerBinding + TriggerTemplate pair above.
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: EventListener
+metadata:
+  name: toolchain-app-listener
+spec:
+  triggers:
+    - name: github-push
+      bindings:
+        - ref: toolchain-app-binding
+      template:
+        ref: toolchain-app-template

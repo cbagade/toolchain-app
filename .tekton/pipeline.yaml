@@ -1,0 +1,203 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# IBM Continuous Delivery — Tekton Pipeline Definition
+# Repo: github.com/cbagade/toolchain-app
+#
+# Stages (in order):
+#   setup → test → static-scan → containerize
+#
+# Each Task reads .pipeline-config.yaml stage scripts via a shared workspace
+# volume so all tasks operate on the same checked-out source tree.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: toolchain-app-pipeline
+spec:
+  params:
+    - name: repository
+      description: Source Git repository URL
+    - name: branch
+      description: Git branch to build
+      default: main
+    - name: revision
+      description: Git commit SHA
+      default: ""
+    - name: DOCKERHUB_USERNAME
+      description: Docker Hub username
+    - name: IMAGE_NAME
+      description: Docker image name (without registry prefix)
+      default: toolchain-app
+    - name: IMAGE_TAG
+      description: Docker image tag
+      default: latest
+  workspaces:
+    - name: source
+  tasks:
+    # ── 1. Clone ──────────────────────────────────────────────────────────────
+    - name: clone
+      taskSpec:
+        params:
+          - name: repository
+          - name: branch
+          - name: revision
+        workspaces:
+          - name: source
+        steps:
+          - name: clone
+            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> [clone] Cloning $(params.repository) @ $(params.branch)"
+              git clone --depth 1 --branch "$(params.branch)" \
+                "$(params.repository)" .
+              if [ -n "$(params.revision)" ]; then
+                git checkout "$(params.revision)"
+              fi
+              echo "==> [clone] Done — $(git log -1 --oneline)"
+      params:
+        - name: repository
+          value: $(params.repository)
+        - name: branch
+          value: $(params.branch)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 2. Setup ──────────────────────────────────────────────────────────────
+    - name: setup
+      runAfter: [clone]
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: setup
+            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> [setup] Installing pip dependencies into cache"
+              pip install --upgrade pip
+              pip install --cache-dir="${HOME}/.cache/pip" -r requirements.txt
+              echo "==> [setup] Dependency installation complete"
+              pip list
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 3. Test ───────────────────────────────────────────────────────────────
+    - name: test
+      runAfter: [setup]
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: test
+            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> [test] Installing dependencies"
+              pip install --cache-dir="${HOME}/.cache/pip" -r requirements.txt
+              echo "==> [test] Running unit tests via unittest discover"
+              python -m unittest discover \
+                --start-directory . \
+                --pattern "test_*.py" \
+                --verbose
+              echo "==> [test] All tests passed"
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 4. Static Scan ────────────────────────────────────────────────────────
+    - name: static-scan
+      runAfter: [test]
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: static-scan
+            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> [static-scan] Installing Bandit SAST tool"
+              pip install bandit
+              echo "==> [static-scan] Running Bandit on source tree"
+              bandit \
+                --recursive . \
+                --severity-level low \
+                --confidence-level low \
+                --format json \
+                --output bandit-report.json \
+                || true
+              echo "==> [static-scan] Bandit human-readable summary"
+              bandit \
+                --recursive . \
+                --severity-level low \
+                --confidence-level low
+              echo "==> [static-scan] Complete — report saved to bandit-report.json"
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 5. Containerize ───────────────────────────────────────────────────────
+    - name: containerize
+      runAfter: [static-scan]
+      taskSpec:
+        params:
+          - name: DOCKERHUB_USERNAME
+          - name: IMAGE_NAME
+          - name: IMAGE_TAG
+        workspaces:
+          - name: source
+          - name: dockerconfig
+        steps:
+          - name: containerize
+            image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+            workingDir: $(workspaces.source.path)
+            env:
+              - name: DOCKERHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: dockerhub-secret
+                    key: token
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              FULL_IMAGE="$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):$(params.IMAGE_TAG)"
+              echo "==> [containerize] Authenticating with Docker Hub"
+              echo "${DOCKERHUB_TOKEN}" | docker login \
+                --username "$(params.DOCKERHUB_USERNAME)" \
+                --password-stdin
+              echo "==> [containerize] Building image: ${FULL_IMAGE}"
+              docker build \
+                --file Dockerfile \
+                --tag "${FULL_IMAGE}" \
+                --build-arg APP_VERSION="$(params.IMAGE_TAG)" \
+                --build-arg BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+                .
+              echo "==> [containerize] Pushing ${FULL_IMAGE}"
+              docker push "${FULL_IMAGE}"
+              docker tag "${FULL_IMAGE}" \
+                "$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):latest"
+              docker push \
+                "$(params.DOCKERHUB_USERNAME)/$(params.IMAGE_NAME):latest"
+              echo "==> [containerize] Done — both tags pushed to Docker Hub"
+      params:
+        - name: DOCKERHUB_USERNAME
+          value: $(params.DOCKERHUB_USERNAME)
+        - name: IMAGE_NAME
+          value: $(params.IMAGE_NAME)
+        - name: IMAGE_TAG
+          value: $(params.IMAGE_TAG)
+      workspaces:
+        - name: source
+          workspace: source
