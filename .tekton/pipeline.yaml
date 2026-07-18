@@ -51,6 +51,10 @@ spec:
               #!/usr/bin/env bash
               set -euo pipefail
               echo "==> [clone] Cloning $(params.repository) @ $(params.branch)"
+
+              # Clean workspace in case of a retry or reuse
+              rm -rf ./* ./.git ./.tekton 2>/dev/null || true
+
               git clone --depth 1 --branch "$(params.branch)" \
                 "$(params.repository)" .
               if [ -n "$(params.revision)" ]; then
